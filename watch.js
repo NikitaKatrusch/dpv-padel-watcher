@@ -136,6 +136,13 @@ function scrub(text) {
 
 class LoginError extends Error {}
 
+// Das Portal fragt dauerhaft nach (z. B. /api/pulse), "networkidle" wird oft nie erreicht: nur begrenzt warten
+async function settle(page, ms = 8000) {
+  await page.waitForLoadState('load', { timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: ms }).catch(() => {});
+  await page.waitForTimeout(2000);
+}
+
 const onLoginPage = (page) => page.locator('input[type=password]').first().isVisible({ timeout: 3000 }).catch(() => false);
 
 async function dismissCookies(page) {
@@ -148,11 +155,25 @@ async function login(page) {
   await page.getByLabel(/e-?mail/i).first().fill(DPV_EMAIL, { timeout: 10_000 });
   await page.locator('input[type=password]').first().fill(DPV_PASSWORD, { timeout: 10_000 });
   await page.getByRole('button', { name: /^anmelden$/i }).first().click({ timeout: 10_000 });
-  await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
+  await settle(page, 15_000);
   await page.waitForTimeout(2500);
 }
 
 // Abbild des aktuellen Zustands für die Diagnose. Eingeloggt: kein HTML, nur der Hauptbereich als Bild.
+function tournamentsFrom(responses) {
+  const out = [];
+  for (const r of responses) {
+    for (const s of r.body?.series || []) {
+      for (const t of s.tournamentSummaries || []) {
+        out.push({ id: t.id, name: t.name, serie: s.name, state: t.currentState, start: t.startDate,
+          registrationStart: t.registrationStart || s.registrationStart, registrationEnd: t.registrationEnd || s.registrationEnd,
+          plaetze: t.capacities ? `${t.capacities.used}/${t.capacities.max}` : undefined });
+      }
+    }
+  }
+  return out.sort((a, b) => String(a.start).localeCompare(String(b.start)));
+}
+
 async function snapshot(page, responses, info) {
   await page.evaluate(() => document.querySelectorAll('input').forEach((i) => { i.value = ''; })).catch(() => {});
   let png = null;
@@ -169,6 +190,7 @@ async function snapshot(page, responses, info) {
     json: scrub(JSON.stringify(apiDump, null, 2).slice(0, 2_000_000)),
     html: info.loggedIn ? '' : scrub((await page.content().catch(() => '')).slice(0, 500_000)),
     info: scrub(JSON.stringify(info, null, 2)),
+    turniere: scrub(JSON.stringify(tournamentsFrom(responses), null, 2)),
   };
 }
 
@@ -195,9 +217,9 @@ async function check(browser, state) {
   });
   try {
     const args = { dateSrc: dateRegexSource(), statusSrc: STATUS_SRC };
-    const nav = await page.goto(WATCH_URL, { waitUntil: 'networkidle', timeout: 60_000 });
+    const nav = await page.goto(WATCH_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     info.navStatus = nav?.status() ?? null;
-    await page.waitForTimeout(2000);
+    await settle(page);
 
     if (await onLoginPage(page)) {
       if (!DPV_EMAIL || !DPV_PASSWORD) throw new LoginError('Das Portal verlangt einen Login, aber DPV_EMAIL/DPV_PASSWORD sind nicht gesetzt');
@@ -208,8 +230,8 @@ async function check(browser, state) {
       }
       info.login = 'durchgeführt';
       await login(page);
-      await page.goto(WATCH_URL, { waitUntil: 'networkidle', timeout: 60_000 });
-      await page.waitForTimeout(2000);
+      await page.goto(WATCH_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await settle(page);
       if (await onLoginPage(page)) {
         const e = new LoginError('Login fehlgeschlagen (Zugangsdaten falsch, reCAPTCHA oder Sperre?)');
         info.login = 'fehlgeschlagen';
@@ -222,8 +244,7 @@ async function check(browser, state) {
     let cards = await page.evaluate(findCards, args);
     for (let i = 0; i < 3 && cards.length === 0; i++) {
       if (!(await page.evaluate(clickNextMonth))) break;
-      await page.waitForLoadState('networkidle').catch(() => {});
-      await page.waitForTimeout(1500);
+      await settle(page, 5000);
       cards = await page.evaluate(findCards, args);
     }
     await Promise.all(pending);
@@ -251,6 +272,7 @@ function writeDebug(d) {
   fs.writeFileSync(path.join(DEBUG_DIR, 'api.json'), d.json);
   if (d.html) fs.writeFileSync(path.join(DEBUG_DIR, 'seite.html'), d.html);
   fs.writeFileSync(path.join(DEBUG_DIR, 'info.json'), d.info);
+  if (d.turniere) fs.writeFileSync(path.join(DEBUG_DIR, 'turniere.json'), d.turniere);
 }
 
 async function notify(title, msg) {
