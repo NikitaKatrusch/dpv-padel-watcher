@@ -121,13 +121,18 @@ async function check(browser) {
   const page = await context.newPage();
   const responses = [];
   const pending = [];
+  const info = { navStatus: null, finalUrl: null, title: null, console: [], failed: [], requests: [] };
+  page.on('console', (m) => { if (m.type() === 'error' && info.console.length < 30) info.console.push(m.text().slice(0, 300)); });
+  page.on('requestfailed', (r) => { if (info.failed.length < 30) info.failed.push(`${r.url().slice(0, 200)} ${r.failure()?.errorText}`); });
   page.on('response', (res) => {
+    if (info.requests.length < 150) info.requests.push(`${res.status()} ${res.request().resourceType()} ${res.url().slice(0, 200)}`);
     if (!(res.headers()['content-type'] || '').includes('json')) return;
     pending.push(res.json().then((body) => responses.push({ url: res.url(), body })).catch(() => {}));
   });
   try {
     const args = { dateSrc: dateRegexSource(), statusSrc: STATUS_SRC };
-    await page.goto(WATCH_URL, { waitUntil: 'networkidle', timeout: 60_000 });
+    const nav = await page.goto(WATCH_URL, { waitUntil: 'networkidle', timeout: 60_000 });
+    info.navStatus = nav?.status() ?? null;
     await page.waitForTimeout(2000);
     let cards = await page.evaluate(findCards, args);
     for (let i = 0; i < 3 && cards.length === 0; i++) {
@@ -137,6 +142,8 @@ async function check(browser) {
       cards = await page.evaluate(findCards, args);
     }
     await Promise.all(pending);
+    info.finalUrl = page.url();
+    info.title = await page.title();
 
     return {
       cards: cards.map((t) => ({ text: t.replace(/\s+/g, ' ').slice(0, 300), status: statusWords(t) })),
@@ -145,6 +152,8 @@ async function check(browser) {
         png: await page.screenshot({ fullPage: true }),
         txt: await page.evaluate(() => document.body.innerText),
         json: JSON.stringify(responses, null, 2).slice(0, 5_000_000),
+        html: (await page.content()).slice(0, 500_000),
+        info: JSON.stringify(info, null, 2),
       },
     };
   } finally {
@@ -157,6 +166,8 @@ function writeDebug(d) {
   fs.writeFileSync(path.join(DEBUG_DIR, 'seite.png'), d.png);
   fs.writeFileSync(path.join(DEBUG_DIR, 'seite.txt'), d.txt);
   fs.writeFileSync(path.join(DEBUG_DIR, 'api.json'), d.json);
+  fs.writeFileSync(path.join(DEBUG_DIR, 'seite.html'), d.html);
+  fs.writeFileSync(path.join(DEBUG_DIR, 'info.json'), d.info);
 }
 
 async function notify(title, msg) {

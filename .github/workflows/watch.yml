@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write   # nur für die Debug-Ausgabe bei manuellen Läufen
 
 jobs:
   watch:
@@ -38,6 +38,7 @@ jobs:
           CHROME_CHANNEL: chrome            # vorinstalliertes Chrome des Runners
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           FAIL_ON_CHANGE: '1'               # Lauf wird rot -> GitHub schickt zusätzlich eine Mail
+          DEBUG: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}   # manueller Lauf: immer Diagnose schreiben
         run: node watch.js --once
 
       - uses: actions/cache/save@v4
@@ -53,3 +54,16 @@ jobs:
           path: debug/
           if-no-files-found: ignore
           retention-days: 3
+
+      # Bei manuellem Start die Diagnose auf einen eigenen Branch legen (lesbar ohne Artifact-Download)
+      - name: Debug-Ausgabe veröffentlichen
+        if: always() && github.event_name == 'workflow_dispatch'
+        run: |
+          [ -d debug ] || exit 0
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git checkout -q --orphan debug-output
+          git rm -rf -q --cached .
+          git add -f debug
+          git commit -qm "Debug-Ausgabe von Lauf ${{ github.run_id }}"
+          git push -f origin debug-output
