@@ -53,6 +53,12 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: bash tools/find-api.sh || true
 
+      - name: Portal-Seiten ohne Login erkunden (nur manuell)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CHROME_CHANNEL: chrome
+        run: node tools/explore.js || true
+
       - name: Turnier prüfen
         env:
           CHROME_CHANNEL: chrome            # vorinstalliertes Chrome des Runners
