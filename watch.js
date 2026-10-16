@@ -117,11 +117,14 @@ function jsonHits(responses) {
 }
 
 async function check(browser) {
-  const context = await browser.newContext({ locale: 'de-DE', timezoneId: 'Europe/Berlin' });
+  // Headless-Chrome meldet sich sonst als "HeadlessChrome"; hier die normale Kennung desselben Browsers
+  const userAgent = process.env.USER_AGENT ||
+    `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`;
+  const context = await browser.newContext({ locale: 'de-DE', timezoneId: 'Europe/Berlin', userAgent });
   const page = await context.newPage();
   const responses = [];
   const pending = [];
-  const info = { navStatus: null, finalUrl: null, title: null, console: [], failed: [], requests: [] };
+  const info = { userAgent, navStatus: null, finalUrl: null, title: null, console: [], failed: [], requests: [] };
   page.on('console', (m) => { if (m.type() === 'error' && info.console.length < 30) info.console.push(m.text().slice(0, 300)); });
   page.on('requestfailed', (r) => { if (info.failed.length < 30) info.failed.push(`${r.url().slice(0, 200)} ${r.failure()?.errorText}`); });
   page.on('response', (res) => {
