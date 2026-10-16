@@ -1,0 +1,12 @@
+{
+  "name": "dpv-watcher",
+  "private": true,
+  "description": "Meldet, wenn das DPV-Padel-Turnier am 06.11. auf Anmeldung wechselt",
+  "scripts": {
+    "setup": "npx playwright install chromium",
+    "start": "node watch.js"
+  },
+  "dependencies": {
+    "playwright": "1.56.1"
+  }
+}

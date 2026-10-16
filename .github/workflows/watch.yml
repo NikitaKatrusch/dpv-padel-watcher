@@ -1,0 +1,55 @@
+name: DPV Turnier-Watcher
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # GitHub führt das meist alle 5-15 min aus
+  workflow_dispatch:         # manueller Start über den Actions-Tab
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Abhängigkeiten installieren
+        run: npm install --no-audit --no-fund --no-package-lock
+
+      # Letzten bekannten Status wiederherstellen (jeder Lauf speichert unter neuem Schlüssel)
+      - uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Turnier prüfen
+        env:
+          CHROME_CHANNEL: chrome            # vorinstalliertes Chrome des Runners
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          FAIL_ON_CHANGE: '1'               # Lauf wird rot -> GitHub schickt zusätzlich eine Mail
+        run: node watch.js --once
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 3
