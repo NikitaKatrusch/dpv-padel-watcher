@@ -49,6 +49,10 @@ jobs:
           } > debug/curl.txt 2>&1
           cat debug/curl.txt
 
+      - name: API-Pfade im Portal suchen (nur manuell)
+        if: github.event_name == 'workflow_dispatch'
+        run: bash tools/find-api.sh || true
+
       - name: Turnier prüfen
         env:
           CHROME_CHANNEL: chrome            # vorinstalliertes Chrome des Runners
