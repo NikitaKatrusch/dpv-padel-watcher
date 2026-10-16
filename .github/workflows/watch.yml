@@ -29,48 +29,29 @@ jobs:
       # Letzten bekannten Status wiederherstellen (jeder Lauf speichert unter neuem Schlüssel)
       - uses: actions/cache/restore@v4
         with:
-          path: state.json
+          path: |
+            state.json
+            session.json
           key: state-${{ github.run_id }}
           restore-keys: state-
-
-      - name: Erreichbarkeit testen (nur manuell)
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          mkdir -p debug
-          U='https://portal.dpv-padel.de/venues/d5526bf5-086f-48a9-b2b1-3d734db7c1bd?tab=calendar'
-          CH='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
-          {
-            echo "== Runner"; curl -s -m 10 https://ipinfo.io/json | grep -E '"(ip|city|region|country|org)"'
-            for ua in "curl/8" "$CH" "${CH/Chrome/HeadlessChrome}"; do
-              echo; echo "== UA: $ua"
-              curl -sS -m 20 -o /dev/null -D - -A "$ua" -H 'Accept-Language: de-DE,de;q=0.9' "$U" | grep -iE '^(HTTP|server|via|x-cache|x-amz|cf-|content-type|location|set-cookie|x-)' || true
-            done
-            echo; echo "== Startseite"; curl -sS -m 20 -o /dev/null -D - -A "$CH" https://portal.dpv-padel.de/ | grep -iE '^(HTTP|server|via|x-cache|cf-)' || true
-          } > debug/curl.txt 2>&1
-          cat debug/curl.txt
-
-      - name: API-Pfade im Portal suchen (nur manuell)
-        if: github.event_name == 'workflow_dispatch'
-        run: bash tools/find-api.sh || true
-
-      - name: Portal-Seiten ohne Login erkunden (nur manuell)
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          CHROME_CHANNEL: chrome
-        run: node tools/explore.js || true
 
       - name: Turnier prüfen
         env:
           CHROME_CHANNEL: chrome            # vorinstalliertes Chrome des Runners
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           FAIL_ON_CHANGE: '1'               # Lauf wird rot -> GitHub schickt zusätzlich eine Mail
+          DPV_EMAIL: ${{ secrets.DPV_EMAIL }}
+          DPV_PASSWORD: ${{ secrets.DPV_PASSWORD }}
+          FORCE_LOGIN: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}   # manuell: Login-Pause ignorieren
           DEBUG: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}   # manueller Lauf: immer Diagnose schreiben
         run: node watch.js --once
 
       - uses: actions/cache/save@v4
         if: always()
         with:
-          path: state.json
+          path: |
+            state.json
+            session.json
           key: state-${{ github.run_id }}
 
       - uses: actions/upload-artifact@v4

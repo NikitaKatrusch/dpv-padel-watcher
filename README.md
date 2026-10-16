@@ -21,6 +21,18 @@ dann schickt GitHub eine Mail.
 Hinweis: GitHub führt Zeitpläne nicht sekundengenau aus; 5–15 Minuten Abstand
 sind normal.
 
+## Login
+
+Das Portal zeigt den Kalender nur angemeldeten Nutzern. Der Watcher meldet sich
+mit einem eigenen Testkonto an (Secrets `DPV_EMAIL` und `DPV_PASSWORD`, nur
+E-Mail/Passwort-Login), speichert die Sitzung im Actions-Cache und meldet sich nur
+bei abgelaufener Sitzung neu an. Schlägt der Login fehl, kommt eine Meldung und der
+nächste Versuch folgt frühestens nach 1 h (steigend bis 6 h), damit das Konto
+nicht gesperrt wird. Die Debug-Ausgabe auf dem Branch `debug-output` ist öffentlich:
+E-Mail, Passwort und Tokens werden herausgefiltert, bei angemeldeten Läufen gibt es
+kein HTML und nur den Hauptbereich als Bild. Für das Testkonto deshalb keinen
+echten Namen verwenden.
+
 ## Lokal
 
     npm install && npm run setup

@@ -19,6 +19,9 @@ const FAIL_ON_CHANGE = process.env.FAIL_ON_CHANGE === '1'; // --once: Exit 10 be
 const ERROR_ALERT_AFTER = 6; // so viele Fehlversuche in Folge -> Warnung
 const ONCE = process.argv.includes('--once');
 const DEBUG = process.argv.includes('--debug') || process.env.DEBUG === '1';
+const DPV_EMAIL = process.env.DPV_EMAIL || '';
+const DPV_PASSWORD = process.env.DPV_PASSWORD || '';
+const SESSION_FILE = process.env.SESSION_FILE || path.join(__dirname, 'session.json');
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
 const DEBUG_DIR = path.join(__dirname, 'debug');
 
@@ -49,7 +52,8 @@ function findCards({ dateSrc, statusSrc }) {
   const statusRe = new RegExp(statusSrc, 'i');
   const text = (el) => (el.innerText || '').trim();
   const leaves = [...document.body.querySelectorAll('*')].filter(
-    (el) => dateRe.test(text(el)) && ![...el.children].some((c) => dateRe.test(text(c))),
+    (el) => !el.closest('script, style, noscript, template') &&
+      dateRe.test(text(el)) && ![...el.children].some((c) => dateRe.test(text(c))),
   );
   const cards = new Map();
   for (const leaf of leaves) {
@@ -116,19 +120,76 @@ function jsonHits(responses) {
   return hits;
 }
 
-async function check(browser) {
+// --- Login (Testkonto aus den Secrets DPV_EMAIL / DPV_PASSWORD) -------------------------------------------------
+
+// Antworten dieser Adressen werden nie gespeichert (enthalten Sitzungs-Tokens oder Profildaten)
+const SECRET_URL = /authenticate|\/auth\b|auth\/|token|login|logout|password|session|profile|\/me(\?|\/|$)/i;
+
+// Entfernt Zugangsdaten, Tokens und E-Mail-Adressen aus Text, der veröffentlicht werden könnte
+function scrub(text) {
+  let out = String(text);
+  for (const secret of [DPV_EMAIL, DPV_PASSWORD]) if (secret.length >= 6) out = out.split(secret).join('***');
+  return out
+    .replace(/eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]*/g, '***jwt***')
+    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '***@***');
+}
+
+class LoginError extends Error {}
+
+const onLoginPage = (page) => page.locator('input[type=password]').first().isVisible({ timeout: 3000 }).catch(() => false);
+
+async function dismissCookies(page) {
+  const btn = page.getByRole('button', { name: /^ablehnen$/i }).first();
+  if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) await btn.click().catch(() => {});
+}
+
+async function login(page) {
+  await dismissCookies(page);
+  await page.getByLabel(/e-?mail/i).first().fill(DPV_EMAIL, { timeout: 10_000 });
+  await page.locator('input[type=password]').first().fill(DPV_PASSWORD, { timeout: 10_000 });
+  await page.getByRole('button', { name: /^anmelden$/i }).first().click({ timeout: 10_000 });
+  await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+}
+
+// Abbild des aktuellen Zustands für die Diagnose. Eingeloggt: kein HTML, nur der Hauptbereich als Bild.
+async function snapshot(page, responses, info) {
+  await page.evaluate(() => document.querySelectorAll('input').forEach((i) => { i.value = ''; })).catch(() => {});
+  let png = null;
+  if (info.loggedIn) {
+    const main = page.locator('main, [role=main]').first();
+    if (await main.count().catch(() => 0)) png = await main.screenshot({ timeout: 5000 }).catch(() => null);
+  } else {
+    png = await page.screenshot({ fullPage: true }).catch(() => null);
+  }
+  const apiDump = responses.map((r) => ({ url: r.url, body: JSON.stringify(r.body).slice(0, 20_000) }));
+  return {
+    png,
+    txt: scrub(await page.evaluate(() => document.body.innerText).catch(() => '')),
+    json: scrub(JSON.stringify(apiDump, null, 2).slice(0, 2_000_000)),
+    html: info.loggedIn ? '' : scrub((await page.content().catch(() => '')).slice(0, 500_000)),
+    info: scrub(JSON.stringify(info, null, 2)),
+  };
+}
+
+async function check(browser, state) {
   // Headless-Chrome meldet sich sonst als "HeadlessChrome"; hier die normale Kennung desselben Browsers
   const userAgent = process.env.USER_AGENT ||
     `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`;
-  const context = await browser.newContext({ locale: 'de-DE', timezoneId: 'Europe/Berlin', userAgent });
+  const useSession = !!DPV_EMAIL && fs.existsSync(SESSION_FILE);
+  const context = await browser.newContext({
+    locale: 'de-DE', timezoneId: 'Europe/Berlin', userAgent,
+    ...(useSession ? { storageState: SESSION_FILE } : {}),
+  });
   const page = await context.newPage();
   const responses = [];
   const pending = [];
-  const info = { userAgent, navStatus: null, finalUrl: null, title: null, console: [], failed: [], requests: [] };
+  const info = { userAgent, navStatus: null, finalUrl: null, title: null, loggedIn: false, login: useSession ? 'Sitzung wiederverwendet' : 'nicht nötig', console: [], failed: [], requests: [] };
   page.on('console', (m) => { if (m.type() === 'error' && info.console.length < 30) info.console.push(m.text().slice(0, 300)); });
   page.on('requestfailed', (r) => { if (info.failed.length < 30) info.failed.push(`${r.url().slice(0, 200)} ${r.failure()?.errorText}`); });
   page.on('response', (res) => {
     if (info.requests.length < 150) info.requests.push(`${res.status()} ${res.request().resourceType()} ${res.url().slice(0, 200)}`);
+    if (SECRET_URL.test(res.url())) return;
     if (!(res.headers()['content-type'] || '').includes('json')) return;
     pending.push(res.json().then((body) => responses.push({ url: res.url(), body })).catch(() => {}));
   });
@@ -137,6 +198,27 @@ async function check(browser) {
     const nav = await page.goto(WATCH_URL, { waitUntil: 'networkidle', timeout: 60_000 });
     info.navStatus = nav?.status() ?? null;
     await page.waitForTimeout(2000);
+
+    if (await onLoginPage(page)) {
+      if (!DPV_EMAIL || !DPV_PASSWORD) throw new LoginError('Das Portal verlangt einen Login, aber DPV_EMAIL/DPV_PASSWORD sind nicht gesetzt');
+      if (state?.loginRetryAt > Date.now() && process.env.FORCE_LOGIN !== '1') {
+        const e = new Error(`Login pausiert bis ${new Date(state.loginRetryAt).toLocaleTimeString('de-DE', { timeZone: 'Europe/Berlin' })}`);
+        e.paused = true;
+        throw e;
+      }
+      info.login = 'durchgeführt';
+      await login(page);
+      await page.goto(WATCH_URL, { waitUntil: 'networkidle', timeout: 60_000 });
+      await page.waitForTimeout(2000);
+      if (await onLoginPage(page)) {
+        const e = new LoginError('Login fehlgeschlagen (Zugangsdaten falsch, reCAPTCHA oder Sperre?)');
+        info.login = 'fehlgeschlagen';
+        throw e;
+      }
+    }
+    info.loggedIn = !!DPV_EMAIL && !(await onLoginPage(page));
+    if (info.loggedIn) await context.storageState({ path: SESSION_FILE });
+
     let cards = await page.evaluate(findCards, args);
     for (let i = 0; i < 3 && cards.length === 0; i++) {
       if (!(await page.evaluate(clickNextMonth))) break;
@@ -149,16 +231,14 @@ async function check(browser) {
     info.title = await page.title();
 
     return {
-      cards: cards.map((t) => ({ text: t.replace(/\s+/g, ' ').slice(0, 300), status: statusWords(t) })),
+      cards: cards.map((t) => ({ text: scrub(t.replace(/\s+/g, ' ').slice(0, 300)), status: statusWords(t) })),
       api: jsonHits(responses),
-      debug: {
-        png: await page.screenshot({ fullPage: true }),
-        txt: await page.evaluate(() => document.body.innerText),
-        json: JSON.stringify(responses, null, 2).slice(0, 5_000_000),
-        html: (await page.content()).slice(0, 500_000),
-        info: JSON.stringify(info, null, 2),
-      },
+      debug: await snapshot(page, responses, info),
     };
+  } catch (e) {
+    await Promise.all(pending).catch(() => {});
+    e.debug = await snapshot(page, responses, info).catch(() => null);
+    throw e;
   } finally {
     await context.close();
   }
@@ -166,10 +246,10 @@ async function check(browser) {
 
 function writeDebug(d) {
   fs.mkdirSync(DEBUG_DIR, { recursive: true });
-  fs.writeFileSync(path.join(DEBUG_DIR, 'seite.png'), d.png);
+  if (d.png) fs.writeFileSync(path.join(DEBUG_DIR, 'seite.png'), d.png);
   fs.writeFileSync(path.join(DEBUG_DIR, 'seite.txt'), d.txt);
   fs.writeFileSync(path.join(DEBUG_DIR, 'api.json'), d.json);
-  fs.writeFileSync(path.join(DEBUG_DIR, 'seite.html'), d.html);
+  if (d.html) fs.writeFileSync(path.join(DEBUG_DIR, 'seite.html'), d.html);
   fs.writeFileSync(path.join(DEBUG_DIR, 'info.json'), d.info);
 }
 
@@ -200,13 +280,15 @@ async function runOnce(browser, state) {
   const tell = async (...a) => { notified = true; await notify(...a); };
   const next = { found: false, status: [], api: [], misses: 0, errors: 0, ...state };
   try {
-    const res = await check(browser);
+    const res = await check(browser, state);
     const words = [...new Set(res.cards.flatMap((c) => c.status))].sort();
     const api = res.api.map(({ url, ...f }) => f);
     const found = res.cards.length > 0 || api.length > 0;
     console.log(`[${now()}] Status: ${words.join(', ') || '–'}${api.length ? ` | API: ${JSON.stringify(api)}` : ''}`);
 
     next.errors = 0;
+    next.loginFailures = 0;
+    next.loginRetryAt = 0;
     if (!state || DEBUG || !found) writeDebug(res.debug);
     if (!state) {
       res.cards.forEach((c) => console.log(`   Karte: ${c.text}`));
@@ -227,8 +309,16 @@ async function runOnce(browser, state) {
       Object.assign(next, { found: true, status: words, api, misses: 0 });
     }
   } catch (e) {
-    console.error(`[${now()}] Fehler: ${e.message}`);
-    if (++next.errors === ERROR_ALERT_AFTER) await tell('DPV-Watcher: Seite nicht erreichbar', `${ERROR_ALERT_AFTER} Fehler in Folge: ${e.message}`);
+    console.error(`[${now()}] Fehler: ${scrub(e.message)}`);
+    if (e.debug) writeDebug(e.debug);
+    if (e instanceof LoginError && DPV_EMAIL && DPV_PASSWORD) {
+      // Nicht alle 5 Minuten neu versuchen, sonst sperrt das Portal evtl. das Konto
+      next.loginFailures = (next.loginFailures || 0) + 1;
+      const hours = Math.min(next.loginFailures, 6);
+      next.loginRetryAt = Date.now() + hours * 3_600_000;
+      await tell('DPV-Watcher: Login fehlgeschlagen', `${scrub(e.message)}. Nächster Versuch in ${hours} h.`);
+    }
+    if (++next.errors === ERROR_ALERT_AFTER) await tell('DPV-Watcher: Seite nicht erreichbar', `${ERROR_ALERT_AFTER} Fehler in Folge: ${scrub(e.message)}`);
   }
   saveState(next);
   return { notified, next };
